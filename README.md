@@ -10,7 +10,7 @@ Every major coding agent now has rewind/undo: Claude Code (`/rewind`), Gemini CL
 
 ## Features
 
-- [x] Dedicated `/rewind` command — checkpoint browser → diff preview → restore
+- [x] Dedicated `/rewind` command — prompt-oriented list ("back to before this prompt", targeting the previous turn's snapshot) → diff preview → restore; falls back to the plain checkpoint browser when no prompts exist
 - [x] `Esc+Esc` keyboard shortcut — quick files-only rewind
 - [x] Smart checkpointing — snapshots after write/edit/bash tools, 1 per turn
 - [x] Smart dedup — skips checkpoints when worktree unchanged (read-only bash like `ls`, `find`, `cat` don't create checkpoints)

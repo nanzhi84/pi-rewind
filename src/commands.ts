@@ -9,6 +9,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { RewindState } from "./state.js";
 import type { CheckpointData } from "./core.js";
 import { restoreCheckpoint, createCheckpoint, diffCheckpoints, sanitizeForRef, git } from "./core.js";
+import { buildPromptRewindList, type PromptRewindItem } from "./prompts.js";
 
 // ============================================================================
 // Helpers
@@ -38,6 +39,17 @@ function formatCheckpointLabel(cp: CheckpointData, index: number, _state: Rewind
   return `#${index + 1} [${time}]${branchTag} Turn ${cp.turnIndex}`;
 }
 
+function formatPromptLabel(item: PromptRewindItem, index: number): string {
+  const time = formatTimestamp(item.promptTimestamp);
+  const text = item.prompt.replace(/\s+/g, " ").trim();
+  const label = text.length > 50 ? text.slice(0, 49) + "…" : text || "(no text)";
+  const targetTime = formatTimestamp(item.checkpoint.timestamp);
+  const reverts = item.revertedSnapshotCount > 0
+    ? ` · reverts ${item.revertedSnapshotCount} snapshot${item.revertedSnapshotCount > 1 ? "s" : ""}`
+    : "";
+  return `#${index + 1} [${time}] "${label}" ↩ before this prompt (${targetTime})${reverts}`;
+}
+
 type RestoreMode = "all" | "files" | "conversation" | "cancel";
 
 const RESTORE_OPTIONS: { label: string; value: RestoreMode }[] = [
@@ -60,16 +72,29 @@ async function runRewindFlow(
     return;
   }
 
-  // Collect checkpoints sorted newest-first (limit to 25 most recent)
+  // Collect checkpoints sorted newest-first
   const MAX_DISPLAY = 25;
-  const checkpoints = [...state.checkpoints.values()]
-    .sort((a, b) => b.timestamp - a.timestamp)
-    .slice(0, MAX_DISPLAY);
+  const allCheckpoints = [...state.checkpoints.values()]
+    .sort((a, b) => b.timestamp - a.timestamp);
 
-  if (checkpoints.length === 0) {
+  if (allCheckpoints.length === 0) {
     ctx.ui.notify("No checkpoints available", "warning");
     return;
   }
+
+  // Prompt-oriented view (Claude Code style): each entry means "rewind to
+  // just before this user prompt" and targets the newest checkpoint at or
+  // before that prompt (previous turn_end / session-start snapshot).
+  const promptItems = buildPromptRewindList(
+    ctx.sessionManager.getBranch() as any,
+    allCheckpoints,
+  ).slice(0, MAX_DISPLAY);
+
+  // Restore targets per displayed row; fall back to the plain checkpoint
+  // list when no user prompts are available in the current branch.
+  const targets: CheckpointData[] = promptItems.length > 0
+    ? promptItems.map((item) => item.checkpoint as CheckpointData)
+    : allCheckpoints.slice(0, MAX_DISPLAY);
 
   // Build picker items
   const items: string[] = [];
@@ -78,8 +103,10 @@ async function runRewindFlow(
   if (undoRef) {
     items.push("↩ Undo last rewind");
   }
-  for (let i = 0; i < checkpoints.length; i++) {
-    items.push(formatCheckpointLabel(checkpoints[i], i, state, currentBranch));
+  for (let i = 0; i < targets.length; i++) {
+    items.push(promptItems.length > 0
+      ? formatPromptLabel(promptItems[i], i)
+      : formatCheckpointLabel(targets[i], i, state, currentBranch));
   }
 
   const choice = await ctx.ui.select("Rewind to checkpoint:", items);
@@ -98,8 +125,8 @@ async function runRewindFlow(
 
   // Find selected checkpoint
   const idx = items.indexOf(choice) - (undoRef ? 1 : 0);
-  if (idx < 0 || idx >= checkpoints.length) return;
-  const target = checkpoints[idx];
+  if (idx < 0 || idx >= targets.length) return;
+  const target = targets[idx];
 
   // Show diff preview
   let diffText = "";
@@ -162,7 +189,8 @@ async function runRewindFlow(
 
   const what = mode === "all" ? "files + conversation"
     : mode === "files" ? "files" : "conversation";
-  ctx.ui.notify(`Rewound ${what} to checkpoint #${idx + 1}`, "info");
+  const where = promptItems.length > 0 ? `before prompt #${idx + 1}` : `checkpoint #${idx + 1}`;
+  ctx.ui.notify(`Rewound ${what} to ${where}`, "info");
 }
 
 async function performRestore(
